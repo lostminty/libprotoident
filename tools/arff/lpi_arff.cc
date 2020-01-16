@@ -53,6 +53,7 @@
 
 #define __STDC_FORMAT_MACROS
 #define __STDC_LIMIT_MACROS
+#define WIDTH 16
 
 #include <stdio.h>
 #include <assert.h>
@@ -121,13 +122,24 @@ typedef struct ident {
 
 	struct ident_stats in;
 	struct ident_stats out;
-
+	uint8_t *src_mac;
+	uint8_t *dst_mac;
 	double start_ts;
 	double last_ts;
-
+	const char *pkt_ptr;
+	uint32_t pkt_len;
 	lpi_data_t lpi;
 } IdentFlow;
 
+static char *formatted_hexdump(const char *packet, int len) {
+	int i;
+	char buffer[999];
+	char *ptr=&buffer[0];
+	for(i=0;i<len && i< 120 ; i++)
+				ptr+=sprintf(ptr,"%x",(unsigned char)packet[i]);
+
+	return buffer;
+}
 
 static void *start_processing(libtrace_t *trace, libtrace_thread_t *thread,
                 void *global) {
@@ -200,7 +212,10 @@ void init_ident_flow(Flow *f, uint8_t dir, double ts)
 
 	ident->in.iat_min = UINT32_MAX;
 	ident->out.iat_min = UINT32_MAX;
-
+	ident->src_mac = NULL;
+	ident->dst_mac = NULL;
+	ident->pkt_ptr=NULL;
+	ident->pkt_len=0;
 	lpi_init_data(&ident->lpi);
 
 	f->extension = ident;
@@ -231,17 +246,27 @@ static void dump_iat_stats(struct ident_stats *is, char *space, int spacelen) {
 
 char *display_ident(Flow *f, IdentFlow *ident, struct globalopts *opts)
 {
+        
 	char s_ip[100];
 	char c_ip[100];
         char len_stats_out[200];
         char len_stats_in[200];
         char iat_stats_out[200];
         char iat_stats_in[200];
-        char *str;
+        char s_mac[20];
+	char d_mac[20];
+	char *str,*str2;
         lpi_module_t *proto;
 	struct ident_stats *is;
 	int i;
+	uint8_t *src_mac = ident->src_mac;
+        uint8_t *dst_mac = ident->dst_mac;
 
+	snprintf(s_mac,20,"%02x:%02x:%02x:%02x:%02x:%02x", src_mac[0], src_mac[1], src_mac[2], src_mac[3],
+                src_mac[4], src_mac[5]);
+
+        snprintf(d_mac,20,"%02x:%02x:%02x:%02x:%02x:%02x", dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3],
+                dst_mac[4], dst_mac[5]);
 	if (opts->only_dir0 && ident->init_dir == 1)
 		return NULL;
 	if (opts->only_dir1 && ident->init_dir == 0)
@@ -258,8 +283,8 @@ char *display_ident(Flow *f, IdentFlow *ident, struct globalopts *opts)
 	f->id.get_server_ip_str(s_ip);
 	f->id.get_client_ip_str(c_ip);
 
-        str = (char *)malloc(1000);
-
+        str = (char *)malloc(2000);
+	
         dump_len_stats(&ident->out, len_stats_out, 200);
         dump_len_stats(&ident->in, len_stats_in, 200);
         dump_iat_stats(&ident->out, iat_stats_out, 200);
@@ -267,15 +292,30 @@ char *display_ident(Flow *f, IdentFlow *ident, struct globalopts *opts)
 
 	/* basic statistics */
 	snprintf(str, 999,
-                "%s,%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
-                "%s%s%s%s,%.0f,%f\n",
-		proto->name, f->id.get_protocol(),
+                "%s,%s,%s,%s,%u,%u,%u,%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+                "%s%s%s%s,%.0f,%f,",
+		s_mac,d_mac, s_ip, c_ip,
+                        f->id.get_server_port(), f->id.get_client_port(),
+                        proto->protocol,f->id.get_protocol(),
 		ident->out.pkts, ident->out.bytes, ident->in.pkts,
                 ident->in.bytes, len_stats_out, len_stats_in,
                 iat_stats_out, iat_stats_in,
                 (ident->last_ts - ident->start_ts) * 1000000.0,
                 ident->start_ts);
+        char buffer[999];
+        char *ptr=&buffer[0];
+        for(i=0;i<(ident->pkt_len) && i< 120 ; i++)
+{
+                                ptr+=sprintf(ptr,"%02x",(unsigned char)ident->pkt_ptr[i]);
+//				ptr+=sprintf(ptr," ");
+}
 
+
+//        printf("%u",f->id.get_protocol());
+        if((f->id.get_protocol()) !=6 && (f->id.get_protocol()) !=17)
+		return NULL;
+	strcat(str,buffer);
+	strcat(str,"\n");
         return str;
 }
 
@@ -458,6 +498,8 @@ static libtrace_packet_t *per_packet(libtrace_t *trace,
 	if (is_new) {
 		init_ident_flow(f, dir, ts);
 		ident = (IdentFlow *)f->extension;
+		ident->pkt_ptr=(char *)trace_get_packet_buffer(packet, NULL, NULL);
+		ident->pkt_len = trace_get_capture_length(packet);
 	} else {
 		ident = (IdentFlow *)f->extension;
 		if (tcp && tcp->syn && !tcp->ack)
@@ -466,6 +508,12 @@ static libtrace_packet_t *per_packet(libtrace_t *trace,
 
 	/* Update flow statistics in ident */
 	per_packet_flow(packet, ident, dir, ts);
+	
+        if (ident->src_mac == NULL)
+                ident->src_mac=trace_get_source_mac(packet);
+
+        if (ident->dst_mac == NULL)
+                ident->dst_mac=trace_get_destination_mac(packet);
 
 	/* Pass the packet into libprotoident so it can extract any info
 	 * it needs from this packet */
@@ -611,7 +659,7 @@ int main(int argc, char *argv[])
                 if (done) break;
 		fprintf(stderr, "%s\n", argv[i]);
 
-		/* printf arff file header */
+		/* printf arff file header 
 		printf("@relation '%s'\n", argv[i]);
 		printf("\n");
 		printf("@attribute label string\n");
@@ -639,8 +687,7 @@ int main(int argc, char *argv[])
 		printf("@attribute duration numeric\n");
 		printf("@attribute timestamp numeric\n");
 		printf("\n");
-		printf("@data\n");
-
+		printf("@data\n"); */
 		/* Bog-standard libtrace stuff for reading trace files */
 		currenttrace = trace_create(argv[i]);
 

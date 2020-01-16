@@ -85,6 +85,8 @@ typedef struct ident {
 	uint64_t out_pkts;
 	double start_ts;
         double end_ts;
+	uint8_t *src_mac;
+	uint8_t *dst_mac;
 	lpi_data_t lpi;
 } IdentFlow;
 
@@ -151,6 +153,8 @@ void init_ident_flow(Flow *f, uint8_t dir, double ts) {
 	ident->out_pkts = 0;
 	ident->start_ts = ts;
         ident->end_ts = ts;
+	ident->src_mac = NULL;
+	ident->dst_mac = NULL;
 	lpi_init_data(&ident->lpi);
 	f->extension = ident;
 }
@@ -183,11 +187,20 @@ char *display_ident(Flow *f, IdentFlow *ident, struct globalopts *opts) {
 
         char s_ip[100];
 	char c_ip[100];
+	char s_mac[20];
+	char d_mac[20];
         char pload_out[100];
         char pload_in[100];
+	uint8_t *src_mac= ident->src_mac;
+	uint8_t *dst_mac= ident->dst_mac;
         char *str;
 	lpi_module_t *proto;
 
+	snprintf(s_mac,20,"%02x:%02x:%02x:%02x:%02x:%02x", src_mac[0], src_mac[1], src_mac[2], src_mac[3],
+                src_mac[4], src_mac[5]);
+
+	snprintf(d_mac,20,"%02x:%02x:%02x:%02x:%02x:%02x", dst_mac[0], dst_mac[1], dst_mac[2], dst_mac[3],
+                dst_mac[4], dst_mac[5]);
 	if (opts->only_dir0 && ident->init_dir == 1)
 		return NULL;
 	if (opts->only_dir1 && ident->init_dir == 0)
@@ -214,8 +227,8 @@ char *display_ident(Flow *f, IdentFlow *ident, struct globalopts *opts) {
 	dump_payload(ident->lpi, 0, pload_out, 100);
 	dump_payload(ident->lpi, 1, pload_in, 100);
         str = (char *)malloc(750);
-        snprintf(str, 750, "%s %s %s %u %u %u %.3f %.3f %" PRIu64 " %" PRIu64 " %s %s\n",
-			proto->name, s_ip, c_ip,
+        snprintf(str, 750, "%s %s %d %s %s %u %u %u %.3f %.3f %" PRIu64 " %" PRIu64 " %s %s\n",
+			s_mac,d_mac,proto->protocol, s_ip, c_ip,
                         f->id.get_server_port(), f->id.get_client_port(),
                         f->id.get_protocol(), ident->start_ts,
                         ident->end_ts,
@@ -301,6 +314,7 @@ static libtrace_packet_t *per_packet(libtrace_t *trace,
         struct globalopts *opts = (struct globalopts *)global;
         struct threadlocal *tl = (struct threadlocal *)tls;
 
+	
         /* Libflowmanager only deals with IP traffic, so ignore anything
 	 * that does not have an IP header */
         l3 = trace_get_layer3(packet, &l3_type, NULL);
@@ -361,6 +375,12 @@ static libtrace_packet_t *per_packet(libtrace_t *trace,
 		ident->in_pkts += 1;
 	}
 
+
+	if (ident->src_mac == NULL)
+		ident->src_mac=trace_get_source_mac(packet);
+
+        if (ident->dst_mac == NULL)
+                ident->dst_mac=trace_get_destination_mac(packet);
 
 	/* Pass the packet into libprotoident so it can extract any info
 	 * it needs from this packet */
